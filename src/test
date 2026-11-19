@@ -1,0 +1,1136 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Station Température</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f0f4f8;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    h1 { color: #2d3748; }
+
+    .config-box {
+      background: white;
+      border-radius: 12px;
+      padding: 20px 28px;
+      margin-top: 20px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      width: 320px;
+    }
+    .config-box h2 { font-size: 16px; color: #2d3748; margin: 0 0 14px; }
+    .field { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .field label { font-size: 14px; color: #4a5568; }
+    .field input {
+      width: 80px; padding: 6px 8px;
+      border: 1px solid #cbd5e0; border-radius: 6px;
+      font-size: 14px; text-align: center;
+    }
+    button {
+      width: 100%; padding: 10px;
+      background: #3182ce; color: white;
+      border: none; border-radius: 8px;
+      font-size: 15px; cursor: pointer;
+      margin-top: 4px;
+    }
+    button:disabled { background: #a0aec0; cursor: not-allowed; }
+    button:hover:not(:disabled) { background: #2b6cb0; }
+
+    .progress-box {
+      background: white;
+      border-radius: 12px;
+      padding: 16px 28px;
+      margin-top: 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      width: 320px;
+      display: none;
+    }
+    .progress-label { font-size: 13px; color: #4a5568; margin-bottom: 8px; }
+    .progress-bar-bg {
+      background: #e2e8f0; border-radius: 6px; height: 12px; overflow: hidden;
+    }
+    .progress-bar-fill {
+      background: #3182ce; height: 100%; border-radius: 6px;
+      transition: width 0.4s ease;
+    }
+
+    .grid {
+      display: flex; gap: 16px; flex-wrap: wrap;
+      justify-content: center; margin-top: 20px;
+    }
+    .card {
+      background: white; border-radius: 12px;
+      padding: 24px 32px; text-align: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1); min-width: 140px;
+    }
+    .label { font-size: 14px; color: #718096; }
+    .temp  { font-size: 36px; font-weight: bold; color: #e53e3e; margin-top: 4px; }
+    .updated { font-size: 12px; color: #a0aec0; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>Station Température</h1>
+
+  <!-- Zone 1 : configuration -->
+  <div class="config-box">
+    <h2>Paramètres de mesure</h2>
+    <div class="field">
+      <label>Intervalle (s)</label>
+      <input type="number" id="inp-interval" min="1" max="3600" value="5">
+    </div>
+    <div class="field">
+      <label>Nb mesures</label>
+      <input type="number" id="inp-samples" min="1" max="9999" value="3">
+    </div>
+    <button id="btn-lancer" onclick="lancerMesure()">Lancer</button>
+  </div>
+
+  <!-- Zone 2 : progression -->
+  <div class="progress-box" id="progress-box">
+    <div class="progress-label" id="progress-label">Mesure 0 / 0</div>
+    <div class="progress-bar-bg">
+      <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+    </div>
+  </div>
+
+  <!-- Zone 3 : résultats -->
+  <div class="grid" id="sensors"></div>
+  <p class="updated" id="ts">En attente de mesure...</p>
+
+  <script>
+    let polling = null;
+
+    function lancerMesure() {
+      const interval = document.getElementById('inp-interval').value;
+      const samples  = document.getElementById('inp-samples').value;
+
+      // désactive le bouton pendant la mesure
+      document.getElementById('btn-lancer').disabled = true;
+      document.getElementById('progress-box').style.display = 'block';
+
+      // envoie la config à l'ESP32
+      fetch(`/config?interval=${interval}&samples=${samples}`)
+        .then(() => {
+          // démarre le polling de statut
+          if (polling) clearInterval(polling);
+          polling = setInterval(checkStatus, 2000);
+        });
+    }
+
+    function checkStatus() {
+      fetch('/xml')
+        .then(r => r.text())
+        .then(str => {
+          const xml = new DOMParser().parseFromString(str, 'text/xml');
+
+          // lecture du statut
+          const status = xml.querySelector('Status').textContent;
+          const done   = parseInt(xml.querySelector('Done').textContent);
+          const total  = parseInt(xml.querySelector('Total').textContent);
+
+          // mise à jour de la barre de progression
+          const pct = total > 0 ? Math.round(done / total * 100) : 0;
+          document.getElementById('progress-fill').style.width = pct + '%';
+          document.getElementById('progress-label').textContent =
+            `Mesure ${done} / ${total}`;
+
+          // affichage des dernières températures reçues
+          let html = '';
+          const nodes = xml.getElementsByTagName('Sensor');
+          for (let n of nodes) {
+            const id   = n.getAttribute('id');
+            const temp = parseFloat(n.textContent).toFixed(1);
+            html += `<div class="card">
+                       <div class="label">Capteur ${id}</div>
+                       <div class="temp">${temp} °C</div>
+                     </div>`;
+          }
+          if (html) document.getElementById('sensors').innerHTML = html;
+
+          document.getElementById('ts').textContent =
+            'Mis à jour : ' + new Date().toLocaleTimeString();
+
+          // si la campagne est terminée → on arrête le polling
+          // et on réactive le bouton
+          if (status === 'TERMINE') {
+            clearInterval(polling);
+            polling = null;
+            document.getElementById('btn-lancer').disabled = false;
+            document.getElementById('progress-label').textContent =
+              `Terminé — ${total} mesures effectuées`;
+          }
+        });
+    }
+  </script>
+</body>
+</html>
+
+
+
+***********************************************************************
+
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// ================= CONFIG =================
+#define ONE_WIRE_BUS 14
+#define MAX_SENSORS 3   // fixe pour ta maquette
+
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// ================= STRUCTS =================
+typedef struct {
+  int intervalle_sec;
+  int nbSamples;
+} ConfigData;
+
+typedef struct {
+  int sensorId;
+  float temperature;
+} SensorData;
+
+typedef struct {
+  int count;
+  SensorData data[MAX_SENSORS];
+} ResultPacket;
+
+// ================= QUEUES =================
+QueueHandle_t configQueue;
+QueueHandle_t resultQueue;
+
+// ================= MUTEX =================
+SemaphoreHandle_t serialMutex;
+
+// ================= TASK CAPTEURS =================
+void taskCapteurs(void *pvParameters) {
+
+  ConfigData config;
+  ResultPacket packet;
+
+  xQueueReceive(configQueue, &config, portMAX_DELAY);
+
+  for (int s = 0; s < config.nbSamples; s++) {
+
+    packet.count = 0;
+
+    sensors.requestTemperatures();
+
+    for (int i = 0; i < MAX_SENSORS; i++) {
+
+      DeviceAddress addr;
+
+      if (sensors.getAddress(addr, i)) {
+        packet.data[packet.count].sensorId = i;
+        packet.data[packet.count].temperature = sensors.getTempC(addr);
+        packet.count++;
+      }
+    }
+
+    xQueueSend(resultQueue, &packet, portMAX_DELAY);
+
+    xSemaphoreTake(serialMutex, portMAX_DELAY);
+    Serial.println("\n[CAPTEURS] Packet envoyé");
+    xSemaphoreGive(serialMutex);
+
+    vTaskDelay(config.intervalle_sec * 1000 / portTICK_PERIOD_MS);
+  }
+}
+
+// ================= TASK SCHEDULER =================
+void taskScheduler(void *pvParameters) {
+
+  ConfigData config = {10, 5};
+  ResultPacket packet;
+
+  xQueueSend(configQueue, &config, portMAX_DELAY);
+
+  // timeout = 2 * intervalle
+  TickType_t timeout = pdMS_TO_TICKS(config.intervalle_sec * 1000 * 2);
+
+  for (int i = 0; i < config.nbSamples; i++) {
+
+    if (xQueueReceive(resultQueue, &packet, timeout) == pdTRUE) {
+
+      xSemaphoreTake(serialMutex, portMAX_DELAY);
+
+      Serial.println("\n====================");
+      Serial.println(" PACKET RECEIVED ");
+      Serial.println("====================");
+
+      for (int j = 0; j < packet.count; j++) {
+        Serial.print("Sensor ");
+        Serial.print(packet.data[j].sensorId);
+        Serial.print(" = ");
+        Serial.print(packet.data[j].temperature);
+        Serial.println(" °C");
+      }
+
+      Serial.println("====================\n");
+
+      xSemaphoreGive(serialMutex);
+
+    } else {
+
+      xSemaphoreTake(serialMutex, portMAX_DELAY);
+      Serial.println("\n[WARNING] Timeout: no packet received");
+      xSemaphoreGive(serialMutex);
+    }
+  }
+}
+
+// ================= SETUP =================
+void setup() {
+
+  Serial.begin(115200);
+  sensors.begin();
+
+  configQueue = xQueueCreate(1, sizeof(ConfigData));
+  resultQueue = xQueueCreate(1, sizeof(ResultPacket));
+
+  serialMutex = xSemaphoreCreateMutex();
+
+  xTaskCreate(taskCapteurs, "Capteurs", 4096, NULL, 1, NULL);
+  xTaskCreate(taskScheduler, "Scheduler", 4096, NULL, 1, NULL);
+}
+
+// ================= LOOP =================
+void loop() {
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+*******************************
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+#define ONE_WIRE_BUS 14
+#define MAX_SENSORS  3
+#define AP_SSID "CapteurTemp"
+#define AP_PASS "12345678"
+
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+WebServer server(80);
+
+// ================= STRUCTS =================
+typedef struct {
+  int intervalle_sec;
+  int nbSamples;
+} ConfigData;
+
+typedef struct {
+  int sensorId;
+  float temperature;
+} SensorData;
+
+typedef struct {
+  int count;
+  SensorData data[MAX_SENSORS];
+} ResultPacket;
+
+// ================= QUEUES =================
+// configQueue : page web → taskCapteurs (déclencheur)
+// resultQueue : taskCapteurs → taskServer  (résultats)
+QueueHandle_t configQueue;
+QueueHandle_t resultQueue;
+
+// ================= MUTEX =================
+SemaphoreHandle_t serialMutex;
+SemaphoreHandle_t packetMutex;
+
+// ================= GLOBALS =================
+ResultPacket latestPacket;
+
+// ====================================================
+//  Statut système — taskCapteurs écrit, /xml le lit
+//  Permet à la page web de savoir où on en est
+// ====================================================
+typedef enum {
+  STATUS_ATTENTE,      // taskCapteurs bloqué, attend config
+  STATUS_EN_COURS,     // mesures en cours
+  STATUS_TERMINE       // campagne terminée, résultats dispo
+} SystemStatus;
+
+volatile SystemStatus systemStatus = STATUS_ATTENTE;
+volatile int samplesDone  = 0;   // mesures faites
+volatile int samplesTotal = 0;   // total demandé
+
+// ====================================================
+//  PAGE HTML
+//  3 zones :
+//  [1] Formulaire config (interval + nbSamples + bouton Lancer)
+//  [2] Barre de progression (apparaît pendant la mesure)
+//  [3] Résultats (mis à jour toutes les 2s via /xml)
+// ====================================================
+const char PAGE_HTML[] PROGMEM = R"rawhtml(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Station Température</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f0f4f8;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+    h1 { color: #2d3748; }
+
+    .config-box {
+      background: white;
+      border-radius: 12px;
+      padding: 20px 28px;
+      margin-top: 20px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      width: 320px;
+    }
+    .config-box h2 { font-size: 16px; color: #2d3748; margin: 0 0 14px; }
+    .field { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .field label { font-size: 14px; color: #4a5568; }
+    .field input {
+      width: 80px; padding: 6px 8px;
+      border: 1px solid #cbd5e0; border-radius: 6px;
+      font-size: 14px; text-align: center;
+    }
+    button {
+      width: 100%; padding: 10px;
+      background: #3182ce; color: white;
+      border: none; border-radius: 8px;
+      font-size: 15px; cursor: pointer;
+      margin-top: 4px;
+    }
+    button:disabled { background: #a0aec0; cursor: not-allowed; }
+    button:hover:not(:disabled) { background: #2b6cb0; }
+
+    .progress-box {
+      background: white;
+      border-radius: 12px;
+      padding: 16px 28px;
+      margin-top: 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      width: 320px;
+      display: none;
+    }
+    .progress-label { font-size: 13px; color: #4a5568; margin-bottom: 8px; }
+    .progress-bar-bg {
+      background: #e2e8f0; border-radius: 6px; height: 12px; overflow: hidden;
+    }
+    .progress-bar-fill {
+      background: #3182ce; height: 100%; border-radius: 6px;
+      transition: width 0.4s ease;
+    }
+
+    .grid {
+      display: flex; gap: 16px; flex-wrap: wrap;
+      justify-content: center; margin-top: 20px;
+    }
+    .card {
+      background: white; border-radius: 12px;
+      padding: 24px 32px; text-align: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1); min-width: 140px;
+    }
+    .label { font-size: 14px; color: #718096; }
+    .temp  { font-size: 36px; font-weight: bold; color: #e53e3e; margin-top: 4px; }
+    .updated { font-size: 12px; color: #a0aec0; margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>Station Température</h1>
+
+  <!-- Zone 1 : configuration -->
+  <div class="config-box">
+    <h2>Paramètres de mesure</h2>
+    <div class="field">
+      <label>Intervalle (s)</label>
+      <input type="number" id="inp-interval" min="1" max="3600" value="5">
+    </div>
+    <div class="field">
+      <label>Nb mesures</label>
+      <input type="number" id="inp-samples" min="1" max="9999" value="3">
+    </div>
+    <button id="btn-lancer" onclick="lancerMesure()">Lancer</button>
+  </div>
+
+  <!-- Zone 2 : progression -->
+  <div class="progress-box" id="progress-box">
+    <div class="progress-label" id="progress-label">Mesure 0 / 0</div>
+    <div class="progress-bar-bg">
+      <div class="progress-bar-fill" id="progress-fill" style="width:0%"></div>
+    </div>
+  </div>
+
+  <!-- Zone 3 : résultats -->
+  <div class="grid" id="sensors"></div>
+  <p class="updated" id="ts">En attente de mesure...</p>
+
+  <script>
+    let polling = null;
+
+    function lancerMesure() {
+      const interval = document.getElementById('inp-interval').value;
+      const samples  = document.getElementById('inp-samples').value;
+
+      // désactive le bouton pendant la mesure
+      document.getElementById('btn-lancer').disabled = true;
+      document.getElementById('progress-box').style.display = 'block';
+
+      // envoie la config à l'ESP32
+      fetch(`/config?interval=${interval}&samples=${samples}`)
+        .then(() => {
+          // démarre le polling de statut
+          if (polling) clearInterval(polling);
+          polling = setInterval(checkStatus, 2000);
+        });
+    }
+
+    function checkStatus() {
+      fetch('/xml')
+        .then(r => r.text())
+        .then(str => {
+          const xml = new DOMParser().parseFromString(str, 'text/xml');
+
+          // lecture du statut
+          const status = xml.querySelector('Status').textContent;
+          const done   = parseInt(xml.querySelector('Done').textContent);
+          const total  = parseInt(xml.querySelector('Total').textContent);
+
+          // mise à jour de la barre de progression
+          const pct = total > 0 ? Math.round(done / total * 100) : 0;
+          document.getElementById('progress-fill').style.width = pct + '%';
+          document.getElementById('progress-label').textContent =
+            `Mesure ${done} / ${total}`;
+
+          // affichage des dernières températures reçues
+          let html = '';
+          const nodes = xml.getElementsByTagName('Sensor');
+          for (let n of nodes) {
+            const id   = n.getAttribute('id');
+            const temp = parseFloat(n.textContent).toFixed(1);
+            html += `<div class="card">
+                       <div class="label">Capteur ${id}</div>
+                       <div class="temp">${temp} °C</div>
+                     </div>`;
+          }
+          if (html) document.getElementById('sensors').innerHTML = html;
+
+          document.getElementById('ts').textContent =
+            'Mis à jour : ' + new Date().toLocaleTimeString();
+
+          // si la campagne est terminée → on arrête le polling
+          // et on réactive le bouton
+          if (status === 'TERMINE') {
+            clearInterval(polling);
+            polling = null;
+            document.getElementById('btn-lancer').disabled = false;
+            document.getElementById('progress-label').textContent =
+              `Terminé — ${total} mesures effectuées`;
+          }
+        });
+    }
+  </script>
+</body>
+</html>
+)rawhtml";
+
+// ====================================================
+//  HANDLER /xml — inclut maintenant le statut et la progression
+//  Le JS lit Status, Done, Total pour piloter l'interface
+// ====================================================
+void handleXML() {
+  String xml = "<?xml version='1.0'?>\n<Data>\n";
+
+  // statut système
+  String statusStr;
+  switch (systemStatus) {
+    case STATUS_ATTENTE:   statusStr = "ATTENTE";   break;
+    case STATUS_EN_COURS:  statusStr = "EN_COURS";  break;
+    case STATUS_TERMINE:   statusStr = "TERMINE";   break;
+  }
+  xml += "<Status>" + statusStr + "</Status>\n";
+  xml += "<Done>"   + String(samplesDone)  + "</Done>\n";
+  xml += "<Total>"  + String(samplesTotal) + "</Total>\n";
+
+  // dernières températures
+  if (xSemaphoreTake(packetMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    for (int i = 0; i < latestPacket.count; i++) {
+      xml += "<Sensor id='" + String(latestPacket.data[i].sensorId) + "'>";
+      xml += String(latestPacket.data[i].temperature, 2);
+      xml += "</Sensor>\n";
+    }
+    xSemaphoreGive(packetMutex);
+  }
+
+  xml += "</Data>\n";
+  server.send(200, "text/xml", xml);
+}
+
+// ====================================================
+//  HANDLER /config
+//  Reçoit interval + samples depuis la page web
+//  Envoie la ConfigData dans configQueue
+//  → taskCapteurs se débloque et démarre la campagne
+// ====================================================
+void handleConfig() {
+  if (!server.hasArg("interval") || !server.hasArg("samples")) {
+    server.send(400, "text/plain", "parametres manquants");
+    return;
+  }
+
+  ConfigData config;
+  config.intervalle_sec = max(1, server.arg("interval").toInt());
+  config.nbSamples      = max(1, server.arg("samples").toInt());
+
+  // xQueueSend avec timeout 0 :
+  // si une config est déjà en attente (tâche pas encore prête)
+  // on ne bloque pas le serveur
+  if (xQueueSend(configQueue, &config, 0) == pdTRUE) {
+    xSemaphoreTake(serialMutex, portMAX_DELAY);
+    Serial.printf("[CONFIG] interval=%ds  samples=%d → envoyé\n",
+                  config.intervalle_sec, config.nbSamples);
+    xSemaphoreGive(serialMutex);
+    server.send(200, "text/plain", "ok");
+  } else {
+    // mesure déjà en cours
+    server.send(409, "text/plain", "mesure en cours");
+  }
+}
+
+void handleRoot() {
+  server.send(200, "text/html", PAGE_HTML);
+}
+
+// ====================================================
+//  TASK CAPTEURS
+//  Cycle de vie :
+//  1. bloque sur configQueue (attend que l'utilisateur lance)
+//  2. reçoit la config → met STATUS_EN_COURS
+//  3. fait nbSamples mesures avec pause intervalle_sec
+//  4. met STATUS_TERMINE
+//  5. retourne en 1 (attend la prochaine campagne)
+// ====================================================
+void taskCapteurs(void *pvParameters) {
+
+  ConfigData   config;
+  ResultPacket packet;
+
+  while (1) {
+
+    // ---- ÉTAPE 1 : attend la config de l'utilisateur ----
+    // portMAX_DELAY = bloque indéfiniment jusqu'à réception
+    // la tâche ne consomme aucun CPU pendant cette attente
+    systemStatus = STATUS_ATTENTE;
+    samplesDone  = 0;
+
+    xSemaphoreTake(serialMutex, portMAX_DELAY);
+    Serial.println("[CAPTEURS] En attente de config...");
+    xSemaphoreGive(serialMutex);
+
+    xQueueReceive(configQueue, &config, portMAX_DELAY);
+
+    // ---- ÉTAPE 2 : config reçue → démarre la campagne ----
+    samplesTotal = config.nbSamples;
+    systemStatus = STATUS_EN_COURS;
+
+    xSemaphoreTake(serialMutex, portMAX_DELAY);
+    Serial.printf("[CAPTEURS] Campagne démarrée : %d mesures × %ds\n",
+                  config.nbSamples, config.intervalle_sec);
+    xSemaphoreGive(serialMutex);
+
+    // ---- ÉTAPE 3 : N mesures ----
+    for (int s = 0; s < config.nbSamples; s++) {
+
+      packet.count = 0;
+      sensors.requestTemperatures();
+
+      for (int i = 0; i < MAX_SENSORS; i++) {
+        DeviceAddress addr;
+        if (sensors.getAddress(addr, i)) {
+          packet.data[packet.count].sensorId    = i;
+          packet.data[packet.count].temperature = sensors.getTempC(addr);
+          packet.count++;
+        }
+      }
+
+      xQueueSend(resultQueue, &packet, portMAX_DELAY);
+      samplesDone = s + 1;
+
+      xSemaphoreTake(serialMutex, portMAX_DELAY);
+      Serial.printf("[CAPTEURS] Mesure %d/%d envoyée\n",
+                    samplesDone, config.nbSamples);
+      xSemaphoreGive(serialMutex);
+
+      // pause entre mesures (sauf après la dernière)
+      if (s < config.nbSamples - 1) {
+        vTaskDelay(pdMS_TO_TICKS(config.intervalle_sec * 1000));
+      }
+    }
+
+    // ---- ÉTAPE 4 : campagne terminée ----
+    systemStatus = STATUS_TERMINE;
+
+    xSemaphoreTake(serialMutex, portMAX_DELAY);
+    Serial.println("[CAPTEURS] Campagne terminée — retour en attente");
+    xSemaphoreGive(serialMutex);
+
+    // retourne en haut du while → bloque sur configQueue
+  }
+}
+
+// ================= TASK SERVER =================
+void taskServer(void *pvParameters) {
+  ResultPacket packet;
+  while (1) {
+    if (xQueueReceive(resultQueue, &packet, 0) == pdTRUE) {
+      xSemaphoreTake(packetMutex, portMAX_DELAY);
+      latestPacket = packet;
+      xSemaphoreGive(packetMutex);
+    }
+    server.handleClient();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+  sensors.begin();
+
+  WiFi.softAP(AP_SSID, AP_PASS);
+  delay(100);
+  Serial.print("IP : ");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/",       handleRoot);
+  server.on("/xml",    handleXML);
+  server.on("/config", handleConfig);
+  server.begin();
+
+  // configQueue de taille 1 — on ne peut envoyer
+  // qu'une seule config à la fois (pas de file d'attente)
+  configQueue = xQueueCreate(1, sizeof(ConfigData));
+  resultQueue = xQueueCreate(1, sizeof(ResultPacket));
+  serialMutex = xSemaphoreCreateMutex();
+  packetMutex = xSemaphoreCreateMutex();
+  latestPacket.count = 0;
+
+  xTaskCreatePinnedToCore(taskCapteurs, "Capteurs", 4096, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(taskServer,   "Server",   8192, NULL, 2, NULL, 1);
+}
+
+void loop() {}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+********************
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+// ================= CONFIG =================
+#define ONE_WIRE_BUS 14
+#define MAX_SENSORS  3
+#define MAX_HISTORY  100
+
+const char* ssid     = "**";
+const char* password = "999999999";
+
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+WebServer server(80);
+
+// ================= STRUCTS =================
+typedef struct {
+  int intervalle_sec;
+  int nbSamples;
+} ConfigData;
+
+typedef struct {
+  int sensorId;
+  float temperature;
+} SensorData;
+
+typedef struct {
+  int count;
+  SensorData data[MAX_SENSORS];
+} ResultPacket;
+
+// ================= QUEUES =================
+QueueHandle_t configQueue;
+QueueHandle_t resultQueue;
+SemaphoreHandle_t dataMutex;
+
+// ================= HISTORY =================
+ResultPacket history[MAX_HISTORY];
+int historyIndex = 0;
+int historyCount = 0;
+bool newDataAvailable = false;
+
+// ================= HTML =================
+const char* HTML_FORM = R"rawliteral(
+<!DOCTYPE html><html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>ESP32 Config</title>
+</head>
+<body>
+
+<h2>Configuration</h2>
+
+<form action="/start" method="POST">
+Intervalle (sec): <input name="intervalle" type="number" value="5"><br><br>
+Nb Samples: <input name="nbSamples" type="number" value="10"><br><br>
+<button type="submit">Start</button>
+</form>
+
+</body>
+</html>
+)rawliteral";
+
+const char* HTML_RESULTS = R"rawliteral(
+<!DOCTYPE html><html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Résultats</title>
+</head>
+<body>
+
+<h2>Données temps réel</h2>
+
+<table border="1">
+<thead>
+<tr>
+  <th>Mesure</th>
+  <th>Capteur 0</th>
+  <th>Capteur 1</th>
+  <th>Capteur 2</th>
+</tr>
+</thead>
+<tbody id="data-body"></tbody>
+</table>
+
+<script>
+
+let pollingInterval = null;
+let mesureIndex = 1;
+
+function fetchData() {
+  fetch('/data')
+    .then(r => r.json())
+    .then(d => {
+
+      if (!d.available) return;
+
+      let row = '<tr>';
+      row += `<td>${mesureIndex}</td>`;
+
+      // initialiser toutes les colonnes à vide
+      let temps = ["—", "—", "—"];
+
+      d.sensors.forEach(s => {
+        if (s.id < 3) {
+          let ok = s.temp > -50 && s.temp < 125;
+          temps[s.id] = ok ? s.temp.toFixed(2) + " °C" : "—";
+        }
+      });
+
+      // ajouter les 3 capteurs
+      for (let i = 0; i < 3; i++) {
+        row += `<td>${temps[i]}</td>`;
+      }
+
+      row += '</tr>';
+
+      // ✅ AJOUT (pas remplacement)
+      document.getElementById('data-body').innerHTML += row;
+
+      mesureIndex++;
+    });
+}
+
+if (pollingInterval) clearInterval(pollingInterval);
+
+pollingInterval = setInterval(fetchData, 2000);
+fetchData();
+
+</script>
+
+</body>
+</html>
+)rawliteral";
+
+// ================= API =================
+void handleData() {
+  String json;
+
+  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+
+    if (!newDataAvailable || historyCount == 0) {
+      xSemaphoreGive(dataMutex);
+      server.send(200, "application/json", "{\"available\":false}");
+      return;
+    }
+
+    int last = (historyIndex - 1 + MAX_HISTORY) % MAX_HISTORY;
+    ResultPacket &p = history[last];
+
+    json = "{\"available\":true,\"sensors\":[";
+
+    for (int i = 0; i < p.count; i++) {
+      if (i) json += ",";
+
+      json += "{\"id\":" + String(p.data[i].sensorId) +
+              ",\"temp\":" + String(p.data[i].temperature, 2) + "}";
+    }
+
+    json += "]}";
+
+    newDataAvailable = false;
+
+    xSemaphoreGive(dataMutex);
+    server.send(200, "application/json", json);
+  } else {
+    server.send(500, "application/json", "{\"error\":\"mutex\"}");
+  }
+}
+
+// ================= START =================
+void handleStart() {
+
+  if (configQueue == NULL) {
+    server.send(500, "text/plain", "Queue non initialisée");
+    return;
+  }
+
+  ConfigData cfg;
+
+  int intervalle = server.hasArg("intervalle") ? server.arg("intervalle").toInt() : 5;
+  int samples    = server.hasArg("nbSamples") ? server.arg("nbSamples").toInt() : 1;
+
+  cfg.intervalle_sec = max(1, (int)intervalle);
+  cfg.nbSamples      = max(1, (int)samples);
+
+  xQueueOverwrite(configQueue, &cfg);
+
+  server.sendHeader("Location", "/results");
+  server.send(302, "text/plain", "");
+}
+
+// ================= WIFI TASK =================
+void taskWifi(void *p) {
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+  }
+
+  Serial.println("\nWiFi connecté !");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", [](){ server.send(200,"text/html",HTML_FORM); });
+  server.on("/start", HTTP_POST, handleStart);
+  server.on("/results", [](){ server.send(200,"text/html",HTML_RESULTS); });
+  server.on("/data", handleData);
+
+  server.begin();
+
+  ResultPacket packet;
+
+  while (true) {
+
+    server.handleClient();
+
+    if (xQueueReceive(resultQueue, &packet, 0) == pdTRUE) {
+
+      if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+
+        history[historyIndex] = packet;
+        historyIndex = (historyIndex + 1) % MAX_HISTORY;
+
+        if (historyCount < MAX_HISTORY)
+          historyCount++;
+
+        newDataAvailable = true;
+
+        xSemaphoreGive(dataMutex);
+      }
+    }
+
+    vTaskDelay(5 / portTICK_PERIOD_MS);
+  }
+}
+
+// ================= SENSOR TASK =================
+void taskSensors(void *p) {
+
+  ConfigData cfg;
+  ResultPacket packet;
+
+  while (true) {
+
+    xQueueReceive(configQueue, &cfg, portMAX_DELAY);
+
+    for (int s = 0; s < cfg.nbSamples; s++) {
+
+      packet.count = 0;
+
+      sensors.requestTemperatures();
+
+      for (int i = 0; i < MAX_SENSORS; i++) {
+
+        DeviceAddress addr;
+
+        if (sensors.getAddress(addr, i)) {
+
+          float temp = sensors.getTempC(addr);
+
+          if (temp != DEVICE_DISCONNECTED_C) {
+
+            packet.data[packet.count].sensorId = i;
+            packet.data[packet.count].temperature = temp;
+            packet.count++;
+          }
+        }
+      }
+
+      xQueueOverwrite(resultQueue, &packet);
+
+      vTaskDelay(cfg.intervalle_sec * 1000 / portTICK_PERIOD_MS);
+    }
+  }
+}
+
+// ================= SETUP =================
+void setup() {
+  Serial.begin(115200);
+  sensors.begin();
+
+  configQueue = xQueueCreate(1, sizeof(ConfigData));
+  resultQueue = xQueueCreate(1, sizeof(ResultPacket));
+  dataMutex = xSemaphoreCreateMutex();
+
+  xTaskCreate(taskWifi, "wifi", 8192, NULL, 1, NULL);
+  xTaskCreate(taskSensors, "sensors", 4096, NULL, 1, NULL);
+}
+
+void loop() {}

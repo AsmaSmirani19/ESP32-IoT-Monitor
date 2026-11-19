@@ -1,0 +1,161 @@
+const char* HTML_PAGE = R"rawliteral(
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>ESP32 Monitoring</title>
+
+<style>
+body {
+  font-family: Arial;
+  background: #f5f7fa;
+  margin: 0;
+  padding: 20px;
+}
+
+.container {
+  max-width: 800px;
+  margin: auto;
+}
+
+.card {
+  background: white;
+  padding: 15px;
+  margin-bottom: 20px;
+  border-radius: 8px;
+}
+
+button {
+  padding: 8px 15px;
+  background: #2d89ef;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 8px;
+  text-align: center;
+  border-bottom: 1px solid #ddd;
+}
+
+th {
+  background: #2d89ef;
+  color: white;
+}
+
+.status {
+  font-size: 12px;
+  color: gray;
+  margin-top: 10px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="card">
+<h2>Configuration</h2>
+
+<form id="configForm">
+Intervalle: <input name="intervalle" type="number" value="5" min="1">
+Samples: <input name="nbSamples" type="number" value="10" min="1">
+<button type="submit">Start</button>
+</form>
+
+<div class="status" id="status">Prêt</div>
+</div>
+
+<div class="card">
+<h2>Données</h2>
+
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Capteur 0</th>
+<th>Capteur 1</th>
+<th>Capteur 2</th>
+</tr>
+</thead>
+
+<tbody id="data-body"></tbody>
+</table>
+
+</div>
+</div>
+
+<script>
+
+let mesureIndex = 1;
+const maxRows = 50;
+
+document.getElementById('configForm').addEventListener('submit', function(e) {
+  e.preventDefault();
+
+  fetch('/start', {
+    method: 'POST',
+    body: new FormData(this)
+  }).then(() => {
+    document.getElementById('status').innerText = "Acquisition démarrée...";
+  });
+
+  document.getElementById('data-body').innerHTML = '';
+  mesureIndex = 1;
+});
+
+function fetchData() {
+  fetch('/data')
+    .then(r => r.json())
+    .then(d => {
+
+      if (!d.available) return;
+
+      let row = '<tr><td>' + mesureIndex + '</td>';
+
+      let temps = ["—","—","—"];
+
+      d.sensors.forEach(s => {
+        if (s.id < 3) {
+          temps[s.id] = s.temp.toFixed(2) + " °C";
+        }
+      });
+
+      for (let i = 0; i < 3; i++) {
+        row += "<td>" + temps[i] + "</td>";
+      }
+
+      row += "</tr>";
+
+      let table = document.getElementById('data-body');
+      table.innerHTML += row;
+
+      // limiter nombre de lignes
+      if (table.rows.length > maxRows) {
+        table.deleteRow(0);
+      }
+
+      mesureIndex++;
+    })
+    .catch(err => {
+      document.getElementById('status').innerText = "Erreur connexion ESP32";
+    });
+}
+
+setInterval(fetchData, 2000);
+
+</script>
+
+</body>
+</html>
+)rawliteral";
